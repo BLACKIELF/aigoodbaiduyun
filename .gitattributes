@@ -1,0 +1,2 @@
+# Unified diffs intentionally contain context prefixes followed by Go tabs.
+patches/*.patch -whitespace
