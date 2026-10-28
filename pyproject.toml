@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aigoodbaiduyun"
+version = "0.2.0"
+description = "Baidu Netdisk MCP with local QR login and background file transfers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "BLACKIELF"}]
+dependencies = ["mcp>=1.30.0,<2"]
+keywords = ["mcp", "baidu", "netdisk", "baidupcs", "qr-login"]
+
+[project.urls]
+Repository = "https://github.com/BLACKIELF/aigoodbaiduyun"
+Issues = "https://github.com/BLACKIELF/aigoodbaiduyun/issues"
+
+[project.scripts]
+aigoodbaiduyun = "aigoodbaiduyun.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aigoodbaiduyun"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "scripts/", "patches/", "README.md", "LICENSE", "THIRD_PARTY.md", "pyproject.toml"]

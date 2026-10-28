@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.DS_Store
+.env
+.env.*
+*.log
+pcs_config.json
+pcs_command_history.txt
+runtime/
+credentials/
+.codex/
+local-*.json
+local-*.sh

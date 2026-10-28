@@ -1,0 +1,154 @@
+--- a/internal/pcsfunctions/pcsupload/upload_task_unit.go
++++ b/internal/pcsfunctions/pcsupload/upload_task_unit.go
+@@ -15,6 +15,7 @@
+ 	"github.com/qjfoidnh/BaiduPCS-Go/pcsutil/taskframework"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester/uploader"
++	"os"
+ 	"path"
+ 	"strings"
+ 	"time"
+@@ -87,6 +88,20 @@
+ 	//	fmt.Printf("[%s] 检测到断点信息, 准备续传...\n", utu.taskInfo.Id())
+ 	//	return
+ 	//}
++	if os.Getenv("AIGOODBAIDUYUN_RESUME") == "1" {
++		utu.state = utu.UploadingDatabase.Search(&utu.LocalFileChecksum.LocalFileMeta)
++		if utu.state != nil && utu.state.Uploadid != "" && len(utu.state.BlockList) > 0 {
++			var completed int64
++			for _, block := range utu.state.BlockList {
++				if block.CheckSum != "" {
++					completed += block.Range.End - block.Range.Begin
++				}
++			}
++			fmt.Printf("[%s] AIGOODBAIDUYUN_RESUME_BYTES=%d\n", utu.taskInfo.Id(), completed)
++			utu.Step = StepUploadUpload
++			return
++		}
++	}
+ 	utu.state = &uploader.InstanceState{}
+ 
+ 	if utu.LocalFileChecksum.Length >= baidupcs.RecommendedUploadSize {
+--- a/internal/pcsfunctions/pcsupload/upload_database.go
++++ b/internal/pcsfunctions/pcsupload/upload_database.go
+@@ -175,7 +175,7 @@
+ 		if uploading.LocalFileMeta == nil {
+ 			continue
+ 		}
+-		if uploading.BlocksList == nil {
++		if uploading.BlocksList == nil && !(os.Getenv("AIGOODBAIDUYUN_RESUME") == "1" && uploading.State != nil && len(uploading.State.BlockList) > 0) {
+ 			continue
+ 		}
+ 		if uploading.LocalFileMeta.EqualLengthMD5(meta) {
+--- a/requester/uploader/multiuploader.go
++++ b/requester/uploader/multiuploader.go
+@@ -8,6 +8,7 @@
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio/speeds"
++	"os"
+ 	"sync"
+ 	"time"
+ )
+@@ -118,9 +119,13 @@
+ 	//	muer.workers = muer.getWorkerListByInstanceState(muer.instanceState)
+ 	//	uploaderVerbose.Infof("upload task CREATED from instance state\n")
+ 	//} else {
+-	muer.workers = muer.getWorkerListByInstanceState(&InstanceState{
+-		BlockList: SplitBlock(muer.file.Len(), muer.config.BlockSize),
+-	})
++	if os.Getenv("AIGOODBAIDUYUN_RESUME") == "1" && muer.instanceState != nil && len(muer.instanceState.BlockList) > 0 {
++		muer.workers = muer.getWorkerListByInstanceState(muer.instanceState)
++	} else {
++		muer.workers = muer.getWorkerListByInstanceState(&InstanceState{
++			BlockList: SplitBlock(muer.file.Len(), muer.config.BlockSize),
++		})
++	}
+ 
+ 	uploaderVerbose.Infof("upload task CREATED: block size: %d, num: %d\n", muer.config.BlockSize, len(muer.workers))
+ 	//}
+--- a/requester/uploader/multiworker.go
++++ b/requester/uploader/multiworker.go
+@@ -56,6 +56,8 @@
+ 	for _, wer := range muer.workers {
+ 		if wer.checksum == "" {
+ 			uploadDeque.Append(wer)
++		} else {
++			checksumMap[wer.id] = wer.checksum
+ 		}
+ 	}
+ 
+--- a/requester/downloader/downloader.go
++++ b/requester/downloader/downloader.go
+@@ -4,6 +4,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/pcsutil"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/pcsutil/cachepool"
+ 	"github.com/qjfoidnh/BaiduPCS-Go/pcsutil/converter"
+@@ -14,6 +15,7 @@
+ 	"github.com/qjfoidnh/BaiduPCS-Go/requester/transfer"
+ 	"io"
+ 	"net/http"
++	"os"
+ 	"sync"
+ 	"time"
+ )
+@@ -358,6 +360,9 @@
+ 	if bii.DownloadStatus != nil {
+ 		// 使用断点信息的状态
+ 		status = bii.DownloadStatus
++		if os.Getenv("AIGOODBAIDUYUN_RESUME") == "1" {
++			fmt.Printf("AIGOODBAIDUYUN_RESUME_BYTES=%d\n", status.Downloaded())
++		}
+ 	} else {
+ 		// 新建状态
+ 		status = transfer.NewDownloadStatus()
+--- /dev/null
++++ b/requester/uploader/aigoodbaiduyun_resume_test.go
+@@ -0,0 +1,43 @@
++package uploader
++
++import (
++	"context"
++	"github.com/qjfoidnh/BaiduPCS-Go/baidupcs/pcserror"
++	"github.com/qjfoidnh/BaiduPCS-Go/requester/rio"
++	"github.com/qjfoidnh/BaiduPCS-Go/requester/transfer"
++	"testing"
++)
++
++type resumeProbe struct {
++	calls  []int
++	merged map[int]string
++}
++
++func (p *resumeProbe) Precreate() (string, pcserror.Error) { return "", nil }
++func (p *resumeProbe) TmpFile(_ context.Context, _, _ string, id int, _ int64, _ rio.ReaderLen64) (string, error) {
++	p.calls = append(p.calls, id)
++	return "new", nil
++}
++func (p *resumeProbe) CreateSuperFile(_, _, _ string, _ int64, checksums map[int]string) error {
++	p.merged = checksums
++	return nil
++}
++func TestAigoodbaiduyunResumesOnlyMissingBlocks(t *testing.T) {
++	t.Setenv("AIGOODBAIDUYUN_RESUME", "1")
++	probe := &resumeProbe{}
++	u := NewMultiUploader(probe, rio.NewCryptoRandReaderAtLen64(8), &MultiUploaderConfig{Parallel: 1, BlockSize: 4}, "/test")
++	u.SetInstanceState(&InstanceState{Uploadid: "test-session", BlockList: []*BlockState{
++		{ID: 0, Range: transfer.Range{Begin: 0, End: 4}, CheckSum: "saved"},
++		{ID: 1, Range: transfer.Range{Begin: 4, End: 8}},
++	}})
++	success := false
++	u.OnSuccess(func() { success = true })
++	u.OnError(func(err error) { t.Fatal(err) })
++	u.Execute()
++	if !success || len(probe.calls) != 1 || probe.calls[0] != 1 {
++		t.Fatalf("wrong resumed requests: %v", probe.calls)
++	}
++	if probe.merged[0] != "saved" || probe.merged[1] != "new" {
++		t.Fatalf("lost completed checksums: %v", probe.merged)
++	}
++}
