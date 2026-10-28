@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import codecs
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import hashlib
 import json
 import os
@@ -189,6 +189,18 @@ def transfer_progress(done: str, total: str, speed: str) -> dict[str, Any]:
             "scope": "current_file"}
 
 
+@contextmanager
+def transfer_registration_lock(root: Path):
+    fd = lock(root / "file-operations.lock")
+    if fd is None:
+        raise ValueError("A file operation is changing paths. Start or resume the transfer after it completes.")
+    try:
+        with registry_lock(root):
+            yield
+    finally:
+        unlock(fd)
+
+
 class Transfers:
     def __init__(self):
         self.root = state_root()
@@ -291,7 +303,7 @@ class Transfers:
         find_binary()
         if not auth_present():
             raise ValueError("No local login found. Use login_qr first.")
-        with registry_lock(self.root):
+        with transfer_registration_lock(self.root):
             for path in self.root.glob("*/record.json"):
                 self.get(path.parent.name)
             active = [r for r in self.records.values() if r["state"] in {"queued", "running", "verifying"}]
@@ -339,7 +351,7 @@ class Transfers:
             if rate_limit_bps != 0 and not 16384 <= rate_limit_bps <= 1024**3:
                 raise ValueError("Invalid bandwidth limit.")
             record["rate_limit_bps"] = rate_limit_bps
-        with registry_lock(self.root):
+        with transfer_registration_lock(self.root):
             for path in self.root.glob("*/record.json"):
                 self.get(path.parent.name)
             if sum(r["state"] in {"queued", "running", "verifying"} for r in self.records.values()) >= MAX_ACTIVE_JOBS:
@@ -539,6 +551,122 @@ async def list_files(path: str = "/") -> dict[str, Any]:
     selected = remote_path(path)
     code, out = await cli(["ls", "-l", selected])
     return {"path": selected, "ok": not failed(out, code), "output": out, "output_limit": MAX_OUTPUT}
+
+
+async def metadata(path: str) -> dict[str, Any]:
+    code, out = await cli(["meta", path])
+    if re.search(r"代码:\s*(?:31066|-9)\b", out) and "不存在" in out:
+        return {"path": path, "exists": False}
+    if code or failed(out, code):
+        raise ValueError("Could not read the Netdisk path: " + out)
+    fields = {}
+    for key in ["类型", "文件路径", "目录路径", "文件大小", "md5 (截图请打码)", "fs_id", "修改日期"]:
+        match = re.search(r"(?m)^\s*" + re.escape(key) + r"\s+(.+?)\s*$", out)
+        if match:
+            fields[key] = match[1]
+    returned = fields.get("文件路径", fields.get("目录路径"))
+    if returned != path or fields.get("类型") not in {"文件", "目录"}:
+        raise ValueError("The CLI did not return metadata for the exact requested path.")
+    result = {"path": path, "exists": True, "is_directory": fields["类型"] == "目录", "file_id": fields.get("fs_id"), "modified": fields.get("修改日期")}
+    if "文件大小" in fields:
+        match = re.match(r"\d+", fields["文件大小"])
+        result["bytes"] = int(match[0]) if match else None
+    if "md5 (截图请打码)" in fields:
+        result["md5"] = fields["md5 (截图请打码)"]
+    return result
+
+
+@mcp.tool(annotations=READ)
+async def file_info(path: str) -> dict[str, Any]:
+    """Read exact Netdisk file/folder metadata: existence, size, file ID and modification time."""
+    return await metadata(remote_path(path))
+
+
+@asynccontextmanager
+async def mutation_lock():
+    fd = lock(transfers.root / "file-operations.lock")
+    if fd is None:
+        raise ValueError("Another file operation is active. Wait for it to finish.")
+    try:
+        yield
+    finally:
+        unlock(fd)
+
+
+def ensure_paths_idle(*paths: str) -> None:
+    for entry in transfers.root.glob("*/record.json"):
+        record = transfers.get(entry.parent.name)
+        if record["state"] not in {"queued", "running", "verifying", "paused"}:
+            continue
+        remote = record["remote"].rstrip("/")
+        for path in paths:
+            if path == remote or path.startswith(remote + "/") or remote.startswith(path.rstrip("/") + "/"):
+                raise ValueError("This path overlaps a pending transfer. Finish or cancel that task before changing its files.")
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def mkdir(path: str) -> dict[str, Any]:
+    """Create a Netdisk folder at an absolute path; verify it exists. Existing folders are reused; existing files are rejected."""
+    selected = remote_path(path)
+    async with mutation_lock():
+        before = await metadata(selected)
+        if before["exists"]:
+            if not before["is_directory"]:
+                raise ValueError("A file already exists at the requested folder path.")
+            return {"ok": True, "created": False, **before}
+        ensure_paths_idle(selected)
+        code, out = await cli(["mkdir", selected])
+        after = await metadata(selected)
+        ok = not code and "创建目录成功" in out and after["exists"] and after["is_directory"]
+        return {"ok": bool(ok), "created": bool(ok), "path": selected, "verified": after, "output": out}
+
+
+async def relocate(operation: str, source: str, destination: str) -> dict[str, Any]:
+    source = remote_path(source, allow_root=False)
+    destination = remote_path(destination, allow_root=False)
+    if destination == source or destination.startswith(source + "/"):
+        raise ValueError("Source and destination must differ, and a folder cannot be put inside itself.")
+    async with mutation_lock():
+        ensure_paths_idle(source, destination)
+        before = await metadata(source)
+        if not before["exists"]:
+            raise ValueError("Source does not exist.")
+        target = await metadata(destination)
+        if target["exists"]:
+            raise ValueError("Destination already exists; this operation never overwrites it. Use the complete new path including filename.")
+        parent = await metadata(str(PurePosixPath(destination).parent))
+        if not parent["exists"] or not parent["is_directory"]:
+            raise ValueError("Destination parent folder does not exist. Create it with mkdir first.")
+        code, out = await cli([operation, source, destination], timeout=90)
+        after = await metadata(destination)
+        original = await metadata(source)
+        markers = ("移动成功", "重命名成功") if operation == "mv" else ("拷贝成功",)
+        ok = not code and any(marker in out for marker in markers) and after["exists"] and (not original["exists"] if operation == "mv" else original["exists"])
+        if ok and not before["is_directory"]:
+            ok = after.get("bytes") == before.get("bytes") and (not before.get("md5") or after.get("md5") == before["md5"])
+        return {"ok": bool(ok), "operation": "move" if operation == "mv" else "copy", "source": source, "destination": destination, "verified": after, "source_exists_after": original["exists"], "output": out}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+async def move(source: str, destination: str) -> dict[str, Any]:
+    """Move a Netdisk file/folder. destination is the complete NEW path, including its name, not just a parent directory. Refuses existing targets and verifies both paths afterward."""
+    return await relocate("mv", source, destination)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+async def rename(path: str, new_name: str) -> dict[str, Any]:
+    """Rename a Netdisk file/folder within its current parent. Existing target names are refused."""
+    selected = remote_path(path, allow_root=False)
+    if not new_name or new_name in {".", ".."} or "/" in new_name or "\\" in new_name:
+        raise ValueError("new_name must be one filename, without a path separator.")
+    destination = str(PurePosixPath(selected).parent / new_name)
+    return await relocate("mv", selected, destination)
+
+
+@mcp.tool(annotations=WRITE)
+async def copy(source: str, destination: str) -> dict[str, Any]:
+    """Copy a Netdisk file/folder to a complete NEW path including its name. Refuses existing targets and verifies the new copy and retained source."""
+    return await relocate("cp", source, destination)
 
 
 @mcp.tool(annotations=WRITE)

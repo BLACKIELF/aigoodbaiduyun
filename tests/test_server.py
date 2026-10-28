@@ -137,7 +137,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(initialized.serverInfo.name, "aigoodbaiduyun")
                 tools = await client.list_tools()
                 names = {tool.name for tool in tools.tools}
-                self.assertEqual(names, {"status", "login_qr", "list_files", "upload", "download", "task_status", "cancel_transfer", "pause_transfer", "resume_transfer", "list_transfers"})
+                self.assertEqual(names, {"status", "login_qr", "list_files", "upload", "download", "task_status", "cancel_transfer", "pause_transfer", "resume_transfer", "list_transfers", "mkdir", "move", "rename", "copy", "file_info"})
                 result = await client.call_tool("status", {})
                 self.assertFalse(result.isError)
                 self.assertTrue(result.structuredContent["remote_verified"])
@@ -206,6 +206,49 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         (folder / "record.json").write_text(json.dumps({"job_id":job_id,"kind":"download","local":str(self.root/'out'),"state":"running","started_at":1}))
         other = server.Transfers()
         self.assertEqual(other.get(job_id)["state"], "paused")
+
+    async def test_file_management_readback_and_no_overwrite(self):
+        tree = {"/": True, "/source.txt": False}
+
+        async def command(args, timeout=30):
+            op = args[0]
+            if op == "meta":
+                path = args[1]
+                if path not in tree:
+                    return 0, "代码: 31066, 消息: 文件或目录不存在"
+                folder = tree[path]
+                return 0, f"类型 {'目录' if folder else '文件'}\n{'目录路径' if folder else '文件路径'} {path}\n文件大小 12, 12B\nmd5 (截图请打码) abc\nfs_id 123\n"
+            if op == "mkdir":
+                tree[args[1]] = True
+                return 0, "创建目录成功"
+            if op in {"mv", "cp"}:
+                tree[args[2]] = tree[args[1]]
+                if op == "mv":
+                    del tree[args[1]]
+                return 0, "重命名成功" if op == "mv" else "拷贝成功"
+            raise AssertionError(args)
+
+        with patch.object(server, "cli", side_effect=command):
+            self.assertTrue((await server.mkdir("/destination"))["created"])
+            self.assertFalse((await server.mkdir("/destination"))["created"])
+            with self.assertRaisesRegex(ValueError, "file already exists"):
+                await server.mkdir("/source.txt")
+            self.assertTrue((await server.copy("/source.txt", "/destination/copy.txt"))["ok"])
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                await server.copy("/source.txt", "/destination/copy.txt")
+            self.assertTrue((await server.rename("/destination/copy.txt", "中文 名称.txt"))["ok"])
+            self.assertTrue((await server.move("/destination/中文 名称.txt", "/moved.txt"))["ok"])
+            self.assertTrue((await server.file_info("/source.txt"))["exists"])
+            self.assertFalse((await server.file_info("/destination/中文 名称.txt"))["exists"])
+            with self.assertRaises(ValueError):
+                await server.rename("/moved.txt", "../escape")
+
+    async def test_transfer_registration_waits_for_path_mutation(self):
+        source = self.root / "source.txt"
+        source.write_bytes(b"x")
+        async with server.mutation_lock():
+            with self.assertRaisesRegex(ValueError, "file operation is changing"):
+                await server.upload(str(source), "/test")
 
 
 if __name__ == "__main__":

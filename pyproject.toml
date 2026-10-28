@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aigoodbaiduyun"
-version = "0.2.0"
+version = "0.3.0"
 description = "Baidu Netdisk MCP with local QR login and background file transfers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,4 +24,4 @@ aigoodbaiduyun = "aigoodbaiduyun.server:main"
 packages = ["src/aigoodbaiduyun"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "tests/", "scripts/", "patches/", "README.md", "LICENSE", "THIRD_PARTY.md", "pyproject.toml"]
+include = ["src/", "tests/", "scripts/", "patches/", "README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY.md", "pyproject.toml"]

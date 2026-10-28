@@ -1,6 +1,6 @@
 # aigoodbaiduyun
 
-1029v1 · Python package 0.2.0
+1029v2 · Python package 0.3.0
 
 百度网盘 MCP：扫码登录、上传下载、暂停续传，以及跨会话保存的传输任务。
 
@@ -95,6 +95,11 @@ AIGOODBAIDUYUN_STATE_DIR = "/absolute/path/to/private-transfer-state"
 | `status` | 检查本地登录，并向百度验证账号和容量 |
 | `login_qr` | macOS 打开扫码终端；其他系统提供本机登录命令 |
 | `list_files` | 列出一个网盘目录 |
+| `file_info` | 检查文件/目录是否存在、大小和修改时间 |
+| `mkdir` | 新建网盘目录，已存在的目录直接复用 |
+| `move` | 移动文件/文件夹，指定完整目标路径 |
+| `rename` | 在当前目录内重命名 |
+| `copy` | 复制到完整目标路径，保留源文件 |
 | `upload` | 上传一个本地文件或文件夹，返回任务编号 |
 | `download` | 下载一个网盘文件或文件夹，返回任务编号 |
 | `task_status` | 查看进度、结果、文件 SHA-256 |
@@ -124,6 +129,19 @@ AIGOODBAIDUYUN_STATE_DIR = "/absolute/path/to/private-transfer-state"
 例如：先上传 `/Users/me/Documents/example.pdf` 到 `/Documents`，待任务成功后，
 把返回的 SHA-256 传入 `download` 的 `expected_sha256`，下载至新的空目录。
 
+### 指定路径与整理文件
+
+- 上传：`upload(local="/Users/me/Documents/example.pdf", remote_dir="/资料")`。
+- 下载：`download(remote="/资料/example.pdf", local_dir="/Volumes/External/下载")`。本地目标目录不存在时自动建立。
+- 新建网盘目录：`mkdir(path="/资料/2026")`。
+- 移动：`move(source="/资料/example.pdf", destination="/资料/2026/example.pdf")`。
+- 重命名：`rename(path="/资料/2026/example.pdf", new_name="报告.pdf")`。
+- 复制：`copy(source="/资料/2026/报告.pdf", destination="/资料/报告备份.pdf")`。
+
+`move` 和 `copy` 的目标必须包含最终文件名，目标父目录要先建立。目标已存在会报错，
+不会覆盖。每次操作后重新查询网盘，确认新路径和源路径的状态；单文件也比对大小和 MD5。
+与未完成传输重叠的路径会拒绝变更，需先完成或取消相应任务。
+
 ## 验证
 
 ```sh
@@ -144,6 +162,7 @@ uv run python tests/live_roundtrip.py --local-dir /absolute/path/to/test-output 
 - 上传续传：16 MiB 文件，完成 4 MiB 后暂停，关闭 MCP，再启动新进程恢复；已完成分片被复用。
 - 下载续传：同一 16 MiB 文件，中途暂停后跨进程恢复；后端报告从已保存的字节位置继续，最终 SHA-256 一致。
 - 重新从固定上游源码构建补丁后端，运行针对已完成分片的回归测试。
+- 新建目录、复制、重命名、移动、目标同名冲突，以及下载到指定目录后 SHA-256 一致。
 
 复验断点续传（会创建并保留一个 16 MiB 测试文件）：
 
