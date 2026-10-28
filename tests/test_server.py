@@ -250,6 +250,14 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "file operation is changing"):
                 await server.upload(str(source), "/test")
 
+    async def test_immediate_cancel_removes_temporary_credentials(self):
+        source = self.root / "slow.txt"
+        source.write_bytes(b"x")
+        job = await server.upload(str(source), "/immediate")
+        await server.cancel_transfer(job["job_id"])
+        self.assertFalse((server.transfers.folder(job["job_id"]) / "pcs_config.json").exists())
+        self.assertNotIn(job["job_id"], server.transfers.locks)
+
 
 if __name__ == "__main__":
     unittest.main()

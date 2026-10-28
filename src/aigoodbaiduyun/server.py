@@ -293,6 +293,7 @@ class Transfers:
             self.stop_states.pop(job_id, None)
             self.tasks[job_id] = asyncio.create_task(self.run(job_id))
         except Exception:
+            (self.folder(job_id) / "pcs_config.json").unlink(missing_ok=True)
             unlock(fd)
             raise
         return self.public(record)
@@ -449,13 +450,17 @@ class Transfers:
         except Exception as exc:
             record.update(state="failed", error=redact(str(exc)))
         finally:
-            if proc is not None:
-                await stop_process(proc)
-            record["finished_at"] = time.time()
-            self.save(record)
-            # Each retry gets a fresh private copy; paused jobs need no stored auth copy.
-            (self.folder(job_id) / "pcs_config.json").unlink(missing_ok=True)
-            unlock(self.locks.pop(job_id, None))
+            try:
+                if proc is not None:
+                    await stop_process(proc)
+                record["finished_at"] = time.time()
+                self.save(record)
+            finally:
+                try:
+                    # Each retry gets a fresh private copy; paused jobs need no stored auth copy.
+                    (self.folder(job_id) / "pcs_config.json").unlink(missing_ok=True)
+                finally:
+                    unlock(self.locks.pop(job_id, None))
 
     async def stop(self, job_id: str, state: str):
         record = self.get(job_id)
@@ -466,8 +471,11 @@ class Transfers:
             await asyncio.gather(task, return_exceptions=True)
             if record["state"] == "queued":
                 record["state"] = state
-                self.save(record)
-                unlock(self.locks.pop(job_id, None))
+                try:
+                    self.save(record)
+                    (self.folder(job_id) / "pcs_config.json").unlink(missing_ok=True)
+                finally:
+                    unlock(self.locks.pop(job_id, None))
         elif record["state"] in {"running", "queued", "verifying"}:
             raise ValueError("This task runs in another MCP process; pause it there.")
         return self.public(record)
